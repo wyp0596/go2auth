@@ -80,6 +80,9 @@ model User {
   createdAt DateTime @default(now())
   accounts  Account[]
   sessions  Session[]
+
+  @@index([email])
+  @@index([phone])
 }
 
 model Account {
@@ -99,6 +102,7 @@ model Account {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Session {
@@ -107,13 +111,18 @@ model Session {
   userId       String
   expires      DateTime
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expires])
 }
 
 model VerificationToken {
   identifier String
   token      String   @unique
   expires    DateTime
+
   @@unique([identifier, token])
+  @@index([expires])
 }
 ```
 
@@ -184,11 +193,11 @@ import { PrismaAdapter } from "@auth/prisma-adapter"
 import { prisma } from "./db"
 
 const cookieDomain = process.env.COOKIE_DOMAIN
+const isProduction = process.env.NODE_ENV === "production"
+const cookiePrefix = isProduction ? "__Secure-" : ""
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   adapter: PrismaAdapter(prisma),
-
-  // 强制使用 database session（默认有 adapter 即为 database session）
   session: { strategy: "database" },
 
   providers: [
@@ -199,32 +208,48 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      allowDangerousEmailAccountLinking: false,
     }),
     GitHub({
       clientId: process.env.GITHUB_CLIENT_ID!,
       clientSecret: process.env.GITHUB_CLIENT_SECRET!,
-      allowDangerousEmailAccountLinking: false,
     }),
   ],
 
-  // 关键：让 cookie 对整个主域生效，实现 app1/app2 子域共享
+  // 关键：所有 cookie 都要设 domain，否则跨子域 CSRF 校验会失败
   cookies: {
     sessionToken: {
-      name: "__Secure-ac.session-token",
+      name: `${cookiePrefix}ac.session-token`,
       options: {
         httpOnly: true,
         sameSite: "lax",
         path: "/",
-        secure: true,
-        domain: cookieDomain, // ".example.com" / ".example.cn"
+        secure: isProduction,
+        domain: cookieDomain,
       },
     },
-    // 其他 cookie（callbackUrl, csrfToken）可按需同样设置 domain
+    csrfToken: {
+      name: `${cookiePrefix}ac.csrf-token`,
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: isProduction,
+        domain: cookieDomain,
+      },
+    },
+    callbackUrl: {
+      name: `${cookiePrefix}ac.callback-url`,
+      options: {
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+        secure: isProduction,
+        domain: cookieDomain,
+      },
+    },
   },
 
   callbacks: {
-    // 让 session 返回 userId（产品侧经常要用）
     session: async ({ session, user }) => {
       if (session.user) (session.user as any).id = user.id
       return session
@@ -324,7 +349,6 @@ export async function middleware(req: NextRequest) {
   const isPublic = url.pathname.startsWith("/public") || url.pathname === "/health"
   if (isPublic) return NextResponse.next()
 
-  // 把用户 cookie 原样转发给 accounts
   const cookie = req.headers.get("cookie") || ""
   const r = await fetch(`${ACCOUNTS_URL}/api/session`, {
     headers: { cookie },
@@ -336,8 +360,12 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(login)
   }
 
-  // 已登录：继续请求
-  return NextResponse.next()
+  // 把 user 信息通过 header 传给下游（Server Component / API Route 可读取）
+  const { user } = await r.json()
+  const res = NextResponse.next()
+  res.headers.set("x-user-id", user.id)
+  res.headers.set("x-user-email", user.email || "")
+  return res
 }
 ```
 
@@ -376,7 +404,32 @@ export async function middleware(req: NextRequest) {
 2. Cookie：`httpOnly + sameSite=lax + secure + domain=.example.com`
 3. OTP（国内手机号）：5 分钟过期，错误 5 次锁定 10 分钟；IP/手机号限流
 4. OAuth：回调 URL 严格白名单（在 provider 控制台配置）
-5. 数据删除：至少提供“注销账号”入口（软删也行）
+5. 数据删除：至少提供"注销账号"入口（软删也行）
+
+### returnTo 白名单实现
+
+```ts
+// lib/redirect.ts
+const ALLOWED_HOSTS = [
+  /^[\w-]+\.example\.com$/,
+  /^[\w-]+\.example\.cn$/,
+  /^[\w-]+\.localtest\.me$/, // 本地开发
+]
+
+export function isAllowedRedirect(url: string): boolean {
+  try {
+    const { hostname } = new URL(url)
+    return ALLOWED_HOSTS.some((re) => re.test(hostname))
+  } catch {
+    return false
+  }
+}
+
+export function getSafeReturnTo(returnTo: string | null, fallback = "/"): string {
+  if (!returnTo) return fallback
+  return isAllowedRedirect(returnTo) ? returnTo : fallback
+}
+```
 
 ---
 
@@ -396,13 +449,3 @@ export async function middleware(req: NextRequest) {
 * 国内短信 + 微信 provider：在 Auth.js 上追加 provider（短信用 Credentials/自定义 OTP；微信用 OAuth provider）
 * “绑定/解绑”逻辑：通过 `Account` 表完成
 * 上传头像：直接存对象存储 URL（不把文件塞 DB）
-
-
-## 技术栈
-
-- **Next.js（App Router）**
-- **Auth.js（NextAuth v5）**：用 **Database Session**（session 存 Postgres）
-- **Prisma**：最省心的 schema/migrate
-- **Postgres**：唯一数据库（不要 Redis）
-
-
