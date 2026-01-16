@@ -1,5 +1,6 @@
 import * as crypto from "crypto"
 import { prisma } from "./db"
+import { isPnvsMode, checkSmsPnvs } from "./sms"
 
 const OTP_EXPIRY_MINUTES = 5
 const RATE_LIMIT_SECONDS = 60
@@ -15,7 +16,7 @@ export function generateOtp(): string {
   return crypto.randomInt(100000, 999999).toString()
 }
 
-export async function createOtpToken(phone: string): Promise<{ ok: boolean; error?: string }> {
+export async function createOtpToken(phone: string): Promise<{ ok: boolean; code?: string; error?: string }> {
   const now = Date.now()
   const limit = rateLimits.get(phone)
 
@@ -31,6 +32,19 @@ export async function createOtpToken(phone: string): Promise<{ ok: boolean; erro
     return { ok: false, error: "发送次数过多，请稍后再试" }
   }
 
+  // Update rate limit
+  rateLimits.set(phone, {
+    lastSent: now,
+    attempts: limit && limit.hourStart > hourAgo ? limit.attempts + 1 : 1,
+    hourStart: limit && limit.hourStart > hourAgo ? limit.hourStart : now,
+  })
+
+  // PNVS mode: 阿里云生成验证码，不存本地
+  if (isPnvsMode()) {
+    return { ok: true }
+  }
+
+  // Legacy mode: 本地生成验证码并存 DB
   const code = generateOtp()
   const expires = new Date(now + OTP_EXPIRY_MINUTES * 60 * 1000)
 
@@ -48,14 +62,7 @@ export async function createOtpToken(phone: string): Promise<{ ok: boolean; erro
     },
   })
 
-  // Update rate limit
-  rateLimits.set(phone, {
-    lastSent: now,
-    attempts: limit && limit.hourStart > hourAgo ? limit.attempts + 1 : 1,
-    hourStart: limit && limit.hourStart > hourAgo ? limit.hourStart : now,
-  })
-
-  return { ok: true }
+  return { ok: true, code }
 }
 
 export async function getOtpCode(phone: string): Promise<string | null> {
@@ -75,6 +82,18 @@ export async function verifyOtp(phone: string, code: string): Promise<{ ok: bool
     return { ok: false, error: `验证次数过多，请 ${wait} 分钟后重试` }
   }
 
+  // PNVS mode: 阿里云验证
+  if (isPnvsMode()) {
+    const result = await checkSmsPnvs(phone, code)
+    if (!result.ok) {
+      incrementVerifyAttempt(phone)
+      return result
+    }
+    verifyAttempts.delete(phone)
+    return { ok: true }
+  }
+
+  // Legacy mode: 本地 DB 验证
   const token = await prisma.verificationToken.findFirst({
     where: { identifier: phone },
   })
