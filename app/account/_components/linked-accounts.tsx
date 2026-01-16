@@ -10,20 +10,26 @@ const providerNames: Record<string, string> = {
 
 export function LinkedAccounts({
   accounts,
+  region,
 }: {
   accounts: { provider: string; providerAccountId: string }[]
+  region: string
 }) {
   const hasGoogle = !!(process.env.NEXT_PUBLIC_HAS_GOOGLE)
   const hasGitHub = !!(process.env.NEXT_PUBLIC_HAS_GITHUB)
+  const isCN = region === "CN"
 
   const linkedProviders = accounts.map((a) => a.provider)
 
   async function handleUnlink(provider: string) {
     if (accounts.length <= 1) {
-      alert("至少保留一种登录方式")
+      alert(isCN ? "至少保留一种登录方式" : "Keep at least one login method")
       return
     }
-    if (!confirm(`确定解绑 ${providerNames[provider] || provider}？`)) return
+    const confirmMsg = isCN
+      ? `确定解绑 ${providerNames[provider] || provider}？`
+      : `Unlink ${providerNames[provider] || provider}?`
+    if (!confirm(confirmMsg)) return
 
     await fetch("/api/user/unlink", {
       method: "POST",
@@ -36,7 +42,7 @@ export function LinkedAccounts({
   return (
     <div className="space-y-3">
       {accounts.length === 0 ? (
-        <p className="text-gray-500">暂无绑定账号</p>
+        <p className="text-gray-500">{isCN ? "暂无绑定账号" : "No linked accounts"}</p>
       ) : (
         accounts.map((account) => (
           <div
@@ -48,7 +54,7 @@ export function LinkedAccounts({
               onClick={() => handleUnlink(account.provider)}
               className="text-sm text-red-600 hover:text-red-700"
             >
-              解绑
+              {isCN ? "解绑" : "Unlink"}
             </button>
           </div>
         ))
@@ -61,7 +67,7 @@ export function LinkedAccounts({
             onClick={() => signIn("google", { callbackUrl: "/account" })}
             className="text-sm text-blue-600 hover:text-blue-700"
           >
-            + 绑定 Google
+            {isCN ? "+ 绑定 Google" : "+ Link Google"}
           </button>
         )}
         {hasGitHub && !linkedProviders.includes("github") && (
@@ -69,7 +75,7 @@ export function LinkedAccounts({
             onClick={() => signIn("github", { callbackUrl: "/account" })}
             className="text-sm text-blue-600 hover:text-blue-700"
           >
-            + 绑定 GitHub
+            {isCN ? "+ 绑定 GitHub" : "+ Link GitHub"}
           </button>
         )}
       </div>
