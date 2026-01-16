@@ -14,10 +14,17 @@ export default async function AccountPage() {
   const region = process.env.REGION || "GLOBAL"
   const isCN = region === "CN"
 
-  const accounts = await prisma.account.findMany({
-    where: { userId: session.user.id },
-    select: { provider: true, providerAccountId: true },
-  })
+  const [accounts, user] = await Promise.all([
+    prisma.account.findMany({
+      where: { userId: session.user.id },
+      select: { provider: true, providerAccountId: true },
+    }),
+    prisma.user.findUnique({
+      where: { id: session.user.id },
+      select: { phone: true },
+    }),
+  ])
+  const phone = user?.phone ?? null
 
   return (
     <div className="min-h-screen bg-gray-50 py-8">
@@ -38,7 +45,7 @@ export default async function AccountPage() {
             <h2 className="text-lg font-medium mb-4">
               {isCN ? "已绑定账号" : "Linked Accounts"}
             </h2>
-            <LinkedAccounts accounts={accounts} region={region} />
+            <LinkedAccounts accounts={accounts} phone={phone} region={region} />
           </section>
 
           <section className="bg-white rounded-lg shadow-sm p-6">
